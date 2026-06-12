@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(node --check C:\\\\Users\\\\snaga\\\\birdbomber\\\\prototype\\\\game.js)"
-    ]
-  }
-}
