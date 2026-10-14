@@ -40,6 +40,7 @@ const config = {
   snackMaxInterval: 30,
   snackTravelTime: 4,
   lunchDuration: 8,
+  reactionCutinDuration: 1.2,
 };
 
 const vehicleTypes = [
@@ -50,13 +51,83 @@ const vehicleTypes = [
   { key: "gold", label: "GOLD", score: 10000, relSpeed: 2.0, size: 1.05, color: "#ffc247", weight: 2, target: false },
 ];
 
-const profiles = [
-  "TARGET: IT CEO",
-  "TARGET: NARCISSIST ACTOR",
-  "TARGET: CRYPTO PRINCE",
-  "TARGET: FLEX DRIVER",
-  "TARGET: LUXURY BLOGGER",
+const driverProfiles = [
+  {
+    id: "ceo",
+    tag: "TARGET: IT CEO",
+    name: "IT CEO",
+    lines: [
+      "うわああ！俺のオープンカーがぁ！",
+      "株価が下がるだろ！！",
+      "AI予測にこんな弾道なかったぞ！？",
+      "シリーズAの資金で洗車してやる！",
+      "ちょっと待て、今は株主総会中だ！",
+    ],
+  },
+  {
+    id: "actor",
+    tag: "TARGET: NARCISSIST ACTOR",
+    name: "NARCISSIST ACTOR",
+    lines: [
+      "顔は！顔だけはやめろ！",
+      "セットした髪が台無しじゃないか！",
+      "カメラを止めろ！今のカットはNGだ！",
+      "俺の衣装はオートクチュールなんだぞ！？",
+      "スタントマン！なぜ俺の盾にならない！",
+    ],
+  },
+  {
+    id: "crypto",
+    tag: "TARGET: CRYPTO PRINCE",
+    name: "CRYPTO PRINCE",
+    lines: [
+      "クリーニング代を請求してやる！！誰にだ！？",
+      "俺の純白シートが暴落したんだが！？",
+      "ブロックチェーンにこの屈辱を刻むな！",
+      "スマートコントラクトで鳥をBANしろ！",
+      "ハードウェアウォレットの上に落ちたぁ！",
+    ],
+  },
+  {
+    id: "flex",
+    tag: "TARGET: FLEX DRIVER",
+    name: "FLEX DRIVER",
+    lines: [
+      "フルローンで買ったばかりなんだぞ！",
+      "せっかくエンジン吹かしてイキってたのに！",
+      "オープンにして走らなきゃよかった！！",
+      "レザーシートのコーティングが剥がれる！",
+      "歩行者に指さされて笑われてるじゃないか！",
+    ],
+  },
+  {
+    id: "blogger",
+    tag: "TARGET: LUXURY BLOGGER",
+    name: "LUXURY BLOGGER",
+    lines: [
+      "ちょっと！配信の映えが死んだんだけど！",
+      "アンチコメントが滝のように流れてくる！",
+      "このハッシュタグはトレンド入りしなくていい！",
+      "スポンサー案件のドライブVLOGがボツに！",
+      "フィルターでもこの汚れは消せないわよ！",
+    ],
+  },
 ];
+
+const profiles = driverProfiles.map((p) => p.tag);
+
+const specialReactionLines = {
+  pierced: "防弾ガラスじゃないのか!?",
+  busted: "み、見られていたのか…！",
+};
+
+const phaseTitles = {
+  1: "PHASE 01 — DAY CITY",
+  2: "PHASE 02 — DUSK",
+  3: "PHASE 03 — NEON NIGHT",
+  4: "PHASE 04 — MIDNIGHT RAIN",
+  5: "PHASE 05 — OVERDRIVE",
+};
 
 const bombPhaseDurations = {
   cutin: 1.4,
@@ -113,6 +184,11 @@ function makeState() {
     birdTargetX: laneX(1),
     bank: 0,
     lastPhase: 1,
+    phaseBanner: "",
+    phaseBannerTimer: 0,
+    reactionCutin: null,
+    recentReactionLines: [],
+    shards: [],
   };
 }
 
@@ -225,7 +301,34 @@ function targetReleaseAt(car) {
 }
 
 function futureYUnits(car) {
+  if (car.awareness === "evading" && car.evasionType !== "swerve" && car.speedDelta) {
+    const remainingEvasion = Math.max(0, config.speedEvasionDuration - car.evasionTime);
+    const activeTime = Math.min(config.fallTime, remainingEvasion);
+    const normalTime = Math.max(0, config.fallTime - activeTime);
+    const baseSpeed = car.type.relSpeed * car.speedBoost;
+    return car.yUnits - effectiveRelSpeed(car) * activeTime - baseSpeed * normalTime;
+  }
   return car.yUnits - effectiveRelSpeed(car) * config.fallTime;
+}
+
+function futureCarX(car) {
+  let futureLane = car.laneFloat;
+  if (car.awareness === "evading" && car.evasionType === "swerve") {
+    const p = clamp((car.evasionTime + config.fallTime) / config.swerveDuration, 0, 1);
+    futureLane = lerp(car.laneStart, car.laneEnd, easeOutQuad(p));
+  }
+  const futureDrift = car.type.key === "bike"
+    ? Math.sin((car.age + config.fallTime) * 5.2 + car.wiggle) * 0.13
+    : 0;
+  return laneScalarX(futureLane, futureDrift);
+}
+
+function isHorizontallyAlignedForDrop(car) {
+  if (!car) return false;
+  const predictedX = futureCarX(car);
+  const hitWAtAim = 92 * car.type.size * (car.type.key === "bike" ? 0.95 : 1.08);
+  const rx = hitWAtAim * 0.5;
+  return Math.abs(state.birdX - predictedX) <= rx * 0.92;
 }
 
 function timeToRelease(car) {
@@ -255,7 +358,8 @@ function getLockedCar() {
 
 function inFireWindow(locked) {
   if (!locked) return false;
-  return Math.abs(futureYUnits(locked)) <= config.fireWindowU;
+  if (Math.abs(futureYUnits(locked)) > config.fireWindowU) return false;
+  return isHorizontallyAlignedForDrop(locked);
 }
 
 function awarenessReserveFor(carOrType) {
@@ -315,14 +419,85 @@ function getAliveCarsForScheduling() {
   return state.cars.filter((car) => !car.hit && !car.overshot && car.yUnits > -0.2);
 }
 
+function chooseDriverProfile() {
+  return driverProfiles[Math.floor(Math.random() * driverProfiles.length)];
+}
+
+function pickDriverReactionLine(car, specialLabel = "", isBusted = false) {
+  if (specialLabel === "PIERCED!") {
+    recordReactionLine(specialReactionLines.pierced);
+    return specialReactionLines.pierced;
+  }
+  if (isBusted) {
+    recordReactionLine(specialReactionLines.busted);
+    return specialReactionLines.busted;
+  }
+  const profileObj = (car && car.profileObj) || driverProfiles[0];
+  const recent = state.recentReactionLines || [];
+  const candidates = profileObj.lines.filter((line) => !recent.includes(line));
+  const pool = candidates.length > 0 ? candidates : profileObj.lines;
+  const chosen = pool[Math.floor(Math.random() * pool.length)];
+  recordReactionLine(chosen);
+  return chosen;
+}
+
+function recordReactionLine(line) {
+  if (!state.recentReactionLines) state.recentReactionLines = [];
+  state.recentReactionLines.push(line);
+  while (state.recentReactionLines.length > 2) {
+    state.recentReactionLines.shift();
+  }
+}
+
+function triggerReactionCutin(car, just, specialLabel = "") {
+  const profileObj = (car && car.profileObj) || chooseDriverProfile();
+  const isBusted = Boolean(car && car.bustedEligible);
+  const line = pickDriverReactionLine(car, specialLabel, isBusted);
+  const badge = specialLabel || (isBusted ? "BUSTED!" : just ? "JUST SNIPE" : "DIRECT HIT");
+  state.reactionCutin = {
+    profileId: profileObj.id,
+    profileName: profileObj.name,
+    tag: profileObj.tag,
+    line,
+    badge,
+    color: car ? car.type.color : "#4eefff",
+    vehicleLabel: car ? car.type.label : "TARGET",
+    despair: true,
+    highImpact: Boolean(just || isBusted || specialLabel === "PIERCED!"),
+    t: 0,
+    duration: config.reactionCutinDuration,
+  };
+}
+
+function spawnGlassShards(x, y) {
+  for (let i = 0; i < 10; i++) {
+    const angle = (Math.PI * 2 * i) / 10 + rand(-0.2, 0.2);
+    const speed = rand(140, 310);
+    state.shards.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 60,
+      rot: rand(0, Math.PI * 2),
+      vrot: rand(-9, 9),
+      size: rand(8, 16),
+      life: 0.55,
+      maxLife: 0.55,
+    });
+  }
+}
+
 function spawnCar(type, yUnits) {
   const lane = Math.floor(Math.random() * lanes.length);
   const idSource = globalThis.crypto && globalThis.crypto.randomUUID
     ? globalThis.crypto.randomUUID()
     : String(Math.random());
+  const profileObj = chooseDriverProfile();
   const car = {
     id: idSource,
     type,
+    profileObj,
+    profile: profileObj.tag,
     speedBoost: getSpeedBoost(),
     lane,
     laneFloat: lane,
@@ -353,7 +528,7 @@ function spawnCar(type, yUnits) {
   state.cars.push(car);
 
   if (type.key === "gold" || type.key === "bike" || type.key === "open") {
-    state.profile = `${profiles[Math.floor(Math.random() * profiles.length)]} / REL ${type.relSpeed.toFixed(1)}U/S`;
+    state.profile = `${car.profile} / REL ${type.relSpeed.toFixed(1)}U/S`;
     state.profileTimer = 2;
   }
 }
@@ -369,7 +544,7 @@ function styleRank() {
 
 function fireDrop() {
   if (state.mode !== "playing" || isBombCinematicActive()) return;
-  if (state.cooldown > 0) {
+  if (state.cooldown > 0 && state.payloadTokens <= 0) {
     if (state.reloadNagTimer <= 0) {
       state.popups.push({ x: state.birdX, y: config.aimY - 130, text: "RELOADING", life: 0.4, maxLife: 0.4, groundLocked: false });
       state.reloadNagTimer = 0.45;
@@ -378,8 +553,9 @@ function fireDrop() {
   }
 
   if (state.payloadTokens > 0) {
+    const wasReloading = state.cooldown > 0;
     state.payloadTokens -= 1;
-    state.cooldown = 0;
+    state.cooldown = wasReloading && state.payloadTokens === 0 ? config.reload : 0;
   } else {
     state.cooldown = config.reload;
   }
@@ -401,6 +577,7 @@ function isCarOnScreen(car) {
 }
 
 function snapshotCar(car) {
+  const profileObj = car.profileObj || driverProfiles[0];
   return {
     id: car.id,
     typeKey: car.type.key,
@@ -408,6 +585,8 @@ function snapshotCar(car) {
     color: car.type.color,
     size: car.type.size,
     score: car.type.score,
+    profile: car.profile || profileObj.tag,
+    profileName: profileObj.name,
     x: car.screen.x,
     y: car.screen.y,
     w: car.w,
@@ -437,6 +616,7 @@ function triggerBomb() {
   }
 
   const mainSnapshot = snapshotCar(mainCar);
+  const replayQuote = pickDriverReactionLine(mainCar, "", false);
   const hitSnapshots = targets.map(snapshotCar);
   state.bomb = 0;
   state.focus = null;
@@ -453,7 +633,8 @@ function triggerBomb() {
     hitCount: hitSnapshots.length,
     totalGain: 0,
     skippable: state.bombCinematicPlayed,
-    profile: state.profile ? state.profile.split(" / ")[0] : profiles[Math.floor(Math.random() * profiles.length)],
+    profile: mainSnapshot.profile,
+    replayQuote,
   };
 }
 
@@ -494,12 +675,16 @@ function applyBombCinematicHits(cinematic) {
   const scoreBefore = state.score;
   const popupStart = state.popups.length;
   const splashStart = state.splashes.length;
+  const previousCutin = state.reactionCutin;
+  const previousRecent = [...state.recentReactionLines];
   for (const id of cinematic.targetIds) {
     const car = state.cars.find((candidate) => candidate.id === id);
     if (car && !car.hit && !car.overshot) awardHit(car, false, 1.5);
   }
   state.popups.length = popupStart;
   state.splashes.length = splashStart;
+  state.reactionCutin = previousCutin;
+  state.recentReactionLines = previousRecent;
   state.hitstop = 0;
   cinematic.hitApplied = true;
   cinematic.totalGain = Math.max(0, state.score - scoreBefore);
@@ -539,11 +724,15 @@ function awardHit(car, just, bombBonus = 1, specialLabel = "") {
     state.focusGauge = Math.min(config.focusMax, state.focusGauge + 25);
   }
   state.splashes.push({ x: car.screen.x, y: car.screen.y, r: 0, life: 0.55, maxLife: 0.55, color: car.type.color });
+  if (specialLabel === "PIERCED!") {
+    spawnGlassShards(car.screen.x, car.screen.y);
+  }
   const label = specialLabel || (just ? "JUST " : "HIT ");
   state.popups.push({ x: car.screen.x, y: car.screen.y - 46, text: `${label}+${gain}`, life: 0.75, maxLife: 0.75, groundLocked: true });
   if (car.bustedEligible) {
     state.popups.push({ x: car.screen.x, y: car.screen.y - 92, text: "BUSTED!", life: 0.85, maxLife: 0.85, groundLocked: true, color: "#ffea4d" });
   }
+  triggerReactionCutin(car, just, specialLabel);
   state.message = specialLabel || (car.bustedEligible ? "BUSTED!" : just ? "JUST SNIPE" : "TARGET HIT");
   state.messageTimer = 0.8;
   state.hitstop = just ? 0.09 : 0.035;
@@ -615,9 +804,16 @@ function update(realDt) {
   state.cooldown = Math.max(0, state.cooldown - realDt);
   state.spawnCheckTimer -= dt;
   state.messageTimer = Math.max(0, state.messageTimer - realDt);
+  state.phaseBannerTimer = Math.max(0, state.phaseBannerTimer - realDt);
   state.profileTimer = Math.max(0, state.profileTimer - realDt);
   state.reloadNagTimer = Math.max(0, state.reloadNagTimer - realDt);
   state.quickBankCooldown = Math.max(0, state.quickBankCooldown - realDt);
+  if (state.reactionCutin) {
+    state.reactionCutin.t += realDt;
+    if (state.reactionCutin.t >= state.reactionCutin.duration) {
+      state.reactionCutin = null;
+    }
+  }
   flash = Math.max(0, flash - realDt * 2.6);
 
   updatePhaseMessage();
@@ -661,7 +857,9 @@ function updatePhaseMessage() {
   const phase = getPhase();
   if (phase !== state.lastPhase) {
     state.lastPhase = phase;
-    state.message = `PHASE ${String(phase).padStart(2, "0")}`;
+    state.phaseBanner = phaseTitles[phase] || `PHASE ${String(phase).padStart(2, "0")}`;
+    state.phaseBannerTimer = 2.2;
+    state.message = state.phaseBanner;
     state.messageTimer = 1.1;
     startLunchBreak(phase);
   }
@@ -954,6 +1152,14 @@ function updateEffects(dt, groundScrollPx) {
   }
   state.splashes = state.splashes.filter((splash) => splash.life > 0 && splash.y < H + 160);
 
+  for (const shard of state.shards) {
+    shard.life -= dt;
+    shard.x += shard.vx * dt;
+    shard.y += shard.vy * dt + groundScrollPx;
+    shard.rot += shard.vrot * dt;
+  }
+  state.shards = state.shards.filter((shard) => shard.life > 0 && shard.y < H + 160);
+
   for (const popup of state.popups) {
     popup.life -= dt;
     popup.y += popup.groundLocked ? groundScrollPx - dt * 24 : -dt * 64;
@@ -1153,7 +1359,7 @@ function drawSnacks() {
 
 function drawImpactZone() {
   const aim = getAim();
-  const ready = state.cooldown <= 0;
+  const ready = state.cooldown <= 0 || state.payloadTokens > 0;
   const hot = ready && inFireWindow(aim.locked);
   const pulse = Math.sin(state.time * 7) * 0.06 + 1;
 
@@ -1169,7 +1375,7 @@ function drawImpactZone() {
   ctx.arc(0, 0, 88 * (hot ? pulse * 1.1 : pulse), 0, Math.PI * 2);
   ctx.stroke();
 
-  const reload = 1 - state.cooldown / config.reload;
+  const reload = ready ? 1 : 1 - state.cooldown / config.reload;
   ctx.lineWidth = 9;
   ctx.beginPath();
   ctx.arc(0, 0, 110, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * reload);
@@ -1405,6 +1611,24 @@ function drawDrops() {
 }
 
 function drawEffects() {
+  for (const shard of state.shards) {
+    const alpha = Math.max(0, shard.life / shard.maxLife);
+    ctx.save();
+    ctx.translate(shard.x, shard.y);
+    ctx.rotate(shard.rot);
+    ctx.fillStyle = `rgba(210, 248, 255, ${alpha * 0.9})`;
+    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -shard.size);
+    ctx.lineTo(shard.size * 0.75, shard.size * 0.5);
+    ctx.lineTo(-shard.size * 0.65, shard.size * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
   for (const splash of state.splashes) {
     const alpha = Math.max(0, splash.life / splash.maxLife);
     ctx.save();
@@ -1694,6 +1918,19 @@ function drawHud() {
     ctx.fillText(`BANK ${state.quickBankCooldown.toFixed(1)}`, W - 44, 184);
   }
 
+  if (state.phaseBannerTimer > 0 && state.mode === "playing") {
+    const bannerAlpha = Math.min(1, state.phaseBannerTimer / 0.4);
+    ctx.save();
+    ctx.globalAlpha = bannerAlpha;
+    ctx.textAlign = "center";
+    ctx.font = "900 32px Consolas, monospace";
+    ctx.fillStyle = "#ffea4d";
+    ctx.shadowColor = "#ffea4d";
+    ctx.shadowBlur = 16;
+    ctx.fillText(state.phaseBanner, CX, H * 0.31);
+    ctx.restore();
+  }
+
   if (state.messageTimer > 0 || state.mode !== "playing") {
     ctx.textAlign = "center";
     ctx.font = "900 56px Consolas, monospace";
@@ -1948,7 +2185,7 @@ function drawBombReplay(cinematic) {
     ctx.restore();
   }
 
-  if (p > 0.46) drawSpeechBubble(carX + 210, carY - 132, cinematic.profile);
+  if (p > 0.46) drawSpeechBubble(carX + 210, carY - 132, cinematic.profile, cinematic.replayQuote);
 
   const popupCount = clamp(Math.floor((cinematic.t - 1.15) / 0.1) + 1, 0, cinematic.hitCount);
   for (let i = 0; i < popupCount; i++) {
@@ -2116,28 +2353,71 @@ function drawDriverFace(x, y, scale, despair) {
   ctx.restore();
 }
 
-function drawSpeechBubble(x, y, text) {
+function drawSpeechBubble(x, y, text, quote = "") {
+  const line = quote || "NOOO!";
   ctx.save();
   ctx.translate(x, y);
-  ctx.fillStyle = "rgba(233, 251, 255, 0.94)";
+  ctx.fillStyle = "rgba(233, 251, 255, 0.95)";
   ctx.strokeStyle = "#ff4fd8";
   ctx.lineWidth = 4;
-  roundRect(-156, -48, 312, 96, 8);
+  roundRect(-210, -54, 420, 108, 8);
   ctx.fill();
   ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(-80, 42);
-  ctx.lineTo(-118, 84);
-  ctx.lineTo(-52, 48);
+  ctx.moveTo(-90, 48);
+  ctx.lineTo(-132, 90);
+  ctx.lineTo(-58, 54);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = "#101923";
-  ctx.font = "900 22px Consolas, monospace";
+  ctx.font = "900 20px Segoe UI, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText("NOOO!", 0, -8);
+  ctx.fillText(line, 0, -8);
   ctx.font = "700 16px Consolas, monospace";
-  ctx.fillText(text.replace("TARGET: ", ""), 0, 22);
+  ctx.fillStyle = "#33485c";
+  ctx.fillText(text.replace("TARGET: ", ""), 0, 26);
+  ctx.restore();
+}
+
+function drawReactionCutin() {
+  const cutin = state.reactionCutin;
+  if (!cutin || state.mode !== "playing" || isBombCinematicActive()) return;
+
+  const enterP = easeOutQuad(clamp(cutin.t / 0.14, 0, 1));
+  const exitP = clamp((cutin.duration - cutin.t) / 0.18, 0, 1);
+  const alpha = Math.min(enterP, exitP);
+  const slideX = lerp(90, 0, enterP);
+
+  const panelX = 192;
+  const panelY = H - 236;
+  const panelW = W - 228;
+  const panelH = 132;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(slideX, 0);
+
+  ctx.fillStyle = "rgba(6, 14, 24, 0.9)";
+  ctx.strokeStyle = cutin.highImpact ? "#ff4fd8" : cutin.color;
+  ctx.shadowColor = cutin.highImpact ? "#ff4fd8" : cutin.color;
+  ctx.shadowBlur = 18;
+  ctx.lineWidth = 4;
+  roundRect(panelX, panelY, panelW, panelH, 10);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  drawDriverFace(panelX + 72, panelY + panelH * 0.5, 0.88, cutin.despair);
+
+  ctx.fillStyle = cutin.highImpact ? "#ff4fd8" : "#51ffa8";
+  ctx.font = "900 20px Consolas, monospace";
+  ctx.textAlign = "left";
+  ctx.fillText(`${cutin.badge} // ${cutin.profileName} (${cutin.vehicleLabel})`, panelX + 146, panelY + 42);
+
+  ctx.fillStyle = "#e9fbff";
+  ctx.font = "800 28px Segoe UI, sans-serif";
+  ctx.fillText(`「${cutin.line}」`, panelX + 146, panelY + 94);
   ctx.restore();
 }
 
@@ -2149,6 +2429,7 @@ function render() {
   drawFocusButton();
   drawBankButtons();
   drawHud();
+  drawReactionCutin();
   drawDebugOverlay();
   drawFlash();
   drawBombCinematic();
@@ -2260,6 +2541,9 @@ if (debugMode) {
         bombTime: state.bombCinematic ? state.bombCinematic.t : 0,
         score: state.score,
         cars: state.cars.length,
+        reactionCutin: state.reactionCutin,
+        recentReactionLines: [...state.recentReactionLines],
+        phaseBanner: state.phaseBanner,
       };
     },
   };
